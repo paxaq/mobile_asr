@@ -1,5 +1,8 @@
 node_modules/
 server/node_modules/
 server/recordings/
+certs/
+server/.env
+server/.env.local
 .env
 .DS_Store

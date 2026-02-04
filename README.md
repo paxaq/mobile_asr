@@ -18,9 +18,30 @@ http://<LAN-IP>:8080/
 
 > iPhone requires HTTPS for microphone access.
 
+## Local HTTPS (mkcert)
+
+Generate certs (already created in certs/):
+
+```
+mkcert -install
+mkcert -cert-file certs/localhost.pem -key-file certs/localhost-key.pem localhost 127.0.0.1 ::1 <LAN-IP>
+```
+
+Run HTTPS reverse proxy:
+
+```
+node server/src/httpsProxy.js
+```
+
+Open:
+
+```
+https://<LAN-IP>:8443/
+```
+
 ## Configuration
 
-All server settings are in server/src/config.js and environment variables.
+All server settings are in server/src/config.js and environment variables. You can place them in `server/.env` (dotenv is enabled).
 
 Minimum required:
 
