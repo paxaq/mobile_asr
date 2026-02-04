@@ -12,7 +12,6 @@ const translationTargetEl = document.getElementById("translationTarget");
 const ttsEnabledEl = document.getElementById("ttsEnabled");
 const ttsModelEl = document.getElementById("ttsModel");
 const ttsVoiceEl = document.getElementById("ttsVoice");
-const idleTimeoutEl = document.getElementById("idleTimeout");
 const btnStart = document.getElementById("btnStart");
 const btnPause = document.getElementById("btnPause");
 const btnStop = document.getElementById("btnStop");
@@ -388,8 +387,6 @@ btnStart.onclick = async () => {
   const sendSessionStart = () => {
     if (sessionStarted) return;
     const targetLang = translationTargetEl?.value?.trim();
-    const idleTimeoutS = Number.parseFloat(idleTimeoutEl?.value || "");
-    const idleTimeout = Number.isFinite(idleTimeoutS) ? idleTimeoutS : 600;
     ws.send({
       type: "session.start",
       session_id: sessionId,
@@ -399,7 +396,6 @@ btnStart.onclick = async () => {
       model: modelSelect?.value || undefined,
       translation_enabled: !!translationEnabledEl?.checked,
       translation_target_languages: targetLang ? [targetLang] : [],
-      inactivity_timeout_s: idleTimeout,
       client_ts: Date.now()
     });
     if (useServerTts()) {
@@ -408,8 +404,7 @@ btnStart.onclick = async () => {
         session_id: sessionId,
         model: ttsModelEl?.value || undefined,
         voice: ttsVoiceEl?.value || undefined,
-        sample_rate: ttsSampleRate,
-        inactivity_timeout_s: idleTimeout
+        sample_rate: ttsSampleRate
       });
     }
     sessionStarted = true;
