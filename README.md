@@ -259,3 +259,60 @@ iPhone Safari
 * WebRTC 替换 WebSocket
 * 多人会话 / 会议模式
 * 录音回放
+
+---
+
+# 实现说明与运行
+
+本仓库已经按上述 SRS 完成 Web 端与后端实现：
+
+* Web：`getUserMedia` + `AudioWorklet` 下采样到 16k，生成 PCM16 20ms 帧，经 WebSocket 发送
+* Backend：WebSocket 接入、鉴权、帧顺序重排与 WAV 写入
+* 断线自动重连（保留 `session_id`）与本地暂停/恢复
+
+## 目录结构
+
+```
+web/            # 前端（静态）
+server/         # Node.js 后端（静态文件 + WS）
+```
+
+## 快速运行（本地）
+
+1) 安装后端依赖：
+
+```
+cd server
+npm i
+```
+
+2) 启动服务（默认 8080）：
+
+```
+node src/index.js
+```
+
+3) 手机 Safari 访问：
+
+```
+http://<你的局域网IP>:8080/
+```
+
+> 若需 WSS（生产环境），请通过反向代理（Nginx/Cloudflare）启用 HTTPS/WSS。
+
+## Web 端配置
+
+Web 端通过 URL 参数配置：
+
+* `ws`：WS 地址（可选），例如：`ws=ws://192.168.0.10:8080/ws/audio`
+* `token`：鉴权 token（可选，默认 `dev-token-12345`）
+
+示例：
+
+```
+http://<你的局域网IP>:8080/?ws=ws://<你的局域网IP>:8080/ws/audio&token=YOUR_TOKEN
+```
+
+## 录音输出
+
+每个会话在 `server/recordings/` 生成 WAV 文件。
