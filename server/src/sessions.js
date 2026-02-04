@@ -20,7 +20,8 @@ export class SessionManager {
       sampleRate,
       frameMs,
       frameSamples,
-      frameBytes: frameSamples * 2
+      frameBytes: frameSamples * 2,
+      frameCount: 0
     };
     this.sessions.set(sessionId, st);
     return st;
@@ -65,8 +66,9 @@ export class SessionManager {
       st.buffer.delete(st.expectedSeq);
       st.wav.writePcm(b);
       st.expectedSeq++;
+      st.frameCount++;
     }
 
-    return { ok: true };
+    return { ok: true, frameCount: st.frameCount };
   }
 }

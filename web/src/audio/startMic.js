@@ -1,8 +1,30 @@
-export async function startMic({ onFrame, dstRate = 16000, frameMs = 20, log }) {
+export async function startMic({ onFrame, dstRate = 16000, frameMs = 20, log, requestTimeoutMs = 15000 }) {
   log ||= (() => {});
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("getUserMedia not supported in this browser");
+  }
+
+  const mediaPromise = navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    },
+    video: false
+  });
+
+  const stream = await Promise.race([
+    mediaPromise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Microphone permission not granted (timed out)")), requestTimeoutMs);
+    })
+  ]);
 
   const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === "suspended") {
+    await audioCtx.resume();
+  }
+
   await audioCtx.audioWorklet.addModule("/src/audio/worklet/pcm-worklet.js");
 
   const source = audioCtx.createMediaStreamSource(stream);
