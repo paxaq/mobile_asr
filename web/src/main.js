@@ -9,10 +9,18 @@ const translatedScriptEl = document.getElementById("translatedScript");
 const modelSelect = document.getElementById("modelSelect");
 const translationEnabledEl = document.getElementById("translationEnabled");
 const translationTargetEl = document.getElementById("translationTarget");
+const ttsEnabledEl = document.getElementById("ttsEnabled");
+const ttsModelEl = document.getElementById("ttsModel");
+const ttsVoiceEl = document.getElementById("ttsVoice");
+const idleTimeoutEl = document.getElementById("idleTimeout");
 const btnStart = document.getElementById("btnStart");
 const btnPause = document.getElementById("btnPause");
 const btnStop = document.getElementById("btnStop");
 const btnDownloadTranslated = document.getElementById("btnDownloadTranslated");
+const btnTranscriptFontDown = document.getElementById("btnTranscriptFontDown");
+const btnTranscriptFontUp = document.getElementById("btnTranscriptFontUp");
+const btnTranslatedFontDown = document.getElementById("btnTranslatedFontDown");
+const btnTranslatedFontUp = document.getElementById("btnTranslatedFontUp");
 const translationHint = document.getElementById("translationHint");
 const micStatusEl = document.getElementById("micStatus");
 
@@ -27,10 +35,14 @@ function renderTranscript() {
   }
   if (!transcriptHistoryEl) return;
   transcriptHistoryEl.innerHTML = "";
-  transcriptItems.forEach((text) => {
+  transcriptItems.forEach((text, index) => {
     const line = document.createElement("div");
     line.className = "history-item";
     line.textContent = text;
+    if (index === 0) {
+      line.style.fontWeight = "700";
+      line.style.fontSize = "1.1em";
+    }
     transcriptHistoryEl.appendChild(line);
   });
 }
@@ -73,6 +85,13 @@ function downloadTranscript(text, sessionId) {
   URL.revokeObjectURL(url);
 }
 
+function adjustFontSize(el, delta, { min = 11, max = 28 } = {}) {
+  if (!el) return;
+  const current = Number.parseFloat(getComputedStyle(el).fontSize) || 14;
+  const next = Math.min(max, Math.max(min, current + delta));
+  el.style.fontSize = `${next}px`;
+}
+
 const params = new URLSearchParams(window.location.search);
 const WS_URL = params.get("ws") || (() => {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
@@ -88,6 +107,80 @@ let sessionActive = false;
 let sessionStarted = false;
 let paused = false;
 let translationSeen = false;
+let ttsQueue = [];
+let ttsSpeaking = false;
+let ttsPartialText = "";
+let ttsAudioPlayer = null;
+let ttsSampleRate = 24000;
+
+class PcmPlayer {
+  constructor(sampleRate) {
+    this.sampleRate = sampleRate;
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+    this.nextStartTime = this.ctx.currentTime;
+  }
+
+  async resume() {
+    if (this.ctx.state === "suspended") {
+      try { await this.ctx.resume(); } catch {}
+    }
+  }
+
+  enqueue(int16) {
+    if (!int16?.length) return;
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
+    }
+    const buffer = this.ctx.createBuffer(1, float32.length, this.sampleRate);
+    buffer.getChannelData(0).set(float32);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(this.ctx.destination);
+    const startAt = Math.max(this.nextStartTime, this.ctx.currentTime + 0.02);
+    src.start(startAt);
+    this.nextStartTime = startAt + buffer.duration;
+  }
+
+  reset() {
+    this.nextStartTime = this.ctx.currentTime;
+  }
+
+  async close() {
+    try { await this.ctx.close(); } catch {}
+  }
+}
+
+function b64ToInt16(b64) {
+  const binary = atob(b64);
+  const len = binary.length;
+  const buf = new ArrayBuffer(len);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < len; i++) view[i] = binary.charCodeAt(i);
+  return new Int16Array(buf);
+}
+
+function ensureTtsPlayer(sampleRate) {
+  if (!ttsAudioPlayer || ttsSampleRate !== sampleRate) {
+    ttsSampleRate = sampleRate;
+    ttsAudioPlayer?.close();
+    ttsAudioPlayer = new PcmPlayer(sampleRate);
+  }
+  ttsAudioPlayer.resume();
+  return ttsAudioPlayer;
+}
+
+function useServerTts() {
+  const ttsModel = ttsModelEl?.value || "";
+  const asrModel = modelSelect?.value || "";
+  const isGummy = asrModel.startsWith("gummy-");
+  return !!ttsEnabledEl?.checked && ttsModel && ttsModel !== "browser-tts" && isGummy;
+}
+
+function sendTtsEvent(wsClient, payload) {
+  if (!wsClient) return;
+  wsClient.send(payload);
+}
 
 function syncTranslationControls() {
   const model = modelSelect?.value || "";
@@ -107,6 +200,60 @@ function syncTranslationControls() {
 function setMicStatus(message) {
   if (!micStatusEl) return;
   micStatusEl.textContent = message || "";
+}
+
+function mapLang(code) {
+  const v = (code || "").toLowerCase();
+  const map = {
+    en: "en-US",
+    zh: "zh-CN",
+    ja: "ja-JP",
+    ko: "ko-KR",
+    fr: "fr-FR",
+    de: "de-DE",
+    es: "es-ES",
+    ru: "ru-RU",
+    it: "it-IT",
+    pt: "pt-PT",
+    id: "id-ID",
+    ar: "ar-SA",
+    th: "th-TH",
+    vi: "vi-VN",
+    nl: "nl-NL",
+    da: "da-DK",
+    hi: "hi-IN",
+    yue: "zh-HK",
+    ms: "ms-MY",
+    ur: "ur-PK",
+    tr: "tr-TR"
+  };
+  return map[v] || navigator.language || "en-US";
+}
+
+function enqueueTts(text, lang) {
+  if (!text || !ttsEnabledEl?.checked) return;
+  ttsQueue.push({ text, lang });
+  if (!ttsSpeaking) playNextTts();
+}
+
+function playNextTts() {
+  const item = ttsQueue.shift();
+  if (!item) {
+    ttsSpeaking = false;
+    return;
+  }
+
+  if (!("speechSynthesis" in window)) {
+    ttsSpeaking = false;
+    return;
+  }
+
+  ttsSpeaking = true;
+  const utter = new SpeechSynthesisUtterance(item.text);
+  utter.lang = mapLang(item.lang);
+  utter.onend = () => playNextTts();
+  utter.onerror = () => playNextTts();
+  window.speechSynthesis.speak(utter);
 }
 
 function uuid() {
@@ -131,6 +278,14 @@ btnStart.onclick = async () => {
   translatedLines.length = 0;
   translationSeen = false;
   liveLine = "";
+  ttsQueue = [];
+  ttsSpeaking = false;
+  ttsPartialText = "";
+  if (useServerTts()) {
+    ensureTtsPlayer(ttsSampleRate).reset();
+  } else {
+    ttsAudioPlayer?.reset();
+  }
   renderTranscript();
   renderTranslatedScript();
 
@@ -163,6 +318,7 @@ btnStart.onclick = async () => {
         }
         return;
       }
+
       if (msg.type === "asr.final") {
         if (!translationSeen) {
           const text = msg.text || "";
@@ -172,16 +328,24 @@ btnStart.onclick = async () => {
           const isGummy = model.startsWith("gummy-");
           if (!translationEnabledEl?.checked || !isGummy) {
             pushTranslatedLine(text);
+            if (useServerTts()) {
+              sendTtsEvent(ws, { type: "tts.append", session_id: sessionId, text });
+              sendTtsEvent(ws, { type: "tts.commit", session_id: sessionId });
+            } else {
+              enqueueTts(text, translationTargetEl?.value?.trim() || "en");
+            }
           }
         }
         return;
       }
+
       if (msg.type === "asr.translation.partial") {
         const label = msg.lang ? `Translation (${msg.lang}): ` : "Translation: ";
         const text = msg.text || "";
         if (text) updateLiveTranscript(label + text);
         return;
       }
+
       if (msg.type === "asr.translation.final") {
         const label = msg.lang ? `Translation (${msg.lang}): ` : "Translation: ";
         const text = msg.text || "";
@@ -189,6 +353,32 @@ btnStart.onclick = async () => {
         translationSeen = true;
         pushTranscript(label + text, true);
         pushTranslatedLine(text);
+        if (useServerTts()) {
+          ttsPartialText = "";
+          sendTtsEvent(ws, { type: "tts.append", session_id: sessionId, text });
+          sendTtsEvent(ws, { type: "tts.commit", session_id: sessionId });
+        } else {
+          enqueueTts(text, msg.lang || translationTargetEl?.value?.trim() || "en");
+        }
+        return;
+      }
+
+      if (msg.type === "tts.session") {
+        if (msg.sample_rate) ttsSampleRate = msg.sample_rate;
+        return;
+      }
+
+      if (msg.type === "tts.audio.delta") {
+        if (!useServerTts()) return;
+        const sampleRate = msg.sample_rate || ttsSampleRate || 24000;
+        const int16 = b64ToInt16(msg.audio_b64 || "");
+        ensureTtsPlayer(sampleRate).enqueue(int16);
+        return;
+      }
+
+      if (msg.type === "tts.error") {
+        console.warn("TTS error:", msg.message);
+        return;
       }
     }
   });
@@ -198,6 +388,8 @@ btnStart.onclick = async () => {
   const sendSessionStart = () => {
     if (sessionStarted) return;
     const targetLang = translationTargetEl?.value?.trim();
+    const idleTimeoutS = Number.parseFloat(idleTimeoutEl?.value || "");
+    const idleTimeout = Number.isFinite(idleTimeoutS) ? idleTimeoutS : 600;
     ws.send({
       type: "session.start",
       session_id: sessionId,
@@ -207,8 +399,19 @@ btnStart.onclick = async () => {
       model: modelSelect?.value || undefined,
       translation_enabled: !!translationEnabledEl?.checked,
       translation_target_languages: targetLang ? [targetLang] : [],
+      inactivity_timeout_s: idleTimeout,
       client_ts: Date.now()
     });
+    if (useServerTts()) {
+      ws.send({
+        type: "tts.start",
+        session_id: sessionId,
+        model: ttsModelEl?.value || undefined,
+        voice: ttsVoiceEl?.value || undefined,
+        sample_rate: ttsSampleRate,
+        inactivity_timeout_s: idleTimeout
+      });
+    }
     sessionStarted = true;
   };
 
@@ -257,6 +460,11 @@ btnStart.onclick = async () => {
 modelSelect?.addEventListener("change", syncTranslationControls);
 syncTranslationControls();
 
+btnTranscriptFontDown?.addEventListener("click", () => adjustFontSize(transcriptEl, -1));
+btnTranscriptFontUp?.addEventListener("click", () => adjustFontSize(transcriptEl, 1));
+btnTranslatedFontDown?.addEventListener("click", () => adjustFontSize(translatedScriptEl, -1));
+btnTranslatedFontUp?.addEventListener("click", () => adjustFontSize(translatedScriptEl, 1));
+
 btnPause.onclick = async () => {
   if (!sessionActive) return;
   if (!paused) {
@@ -292,9 +500,19 @@ btnStop.onclick = async () => {
   btnPause.disabled = true;
 
   ws?.send({ type: "session.stop", session_id: sessionId, client_ts: Date.now() });
+  if (useServerTts()) {
+    ws?.send({ type: "tts.finish", session_id: sessionId });
+  }
   await mic?.stop();
 
   ws?.close();
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  if (useServerTts()) {
+    await ttsAudioPlayer?.close();
+    ttsAudioPlayer = null;
+  } else {
+    ttsAudioPlayer?.reset();
+  }
   mic = null;
   ws = null;
 

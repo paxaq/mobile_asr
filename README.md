@@ -1,6 +1,6 @@
 # Jason's ASR
 
-Real‑time speech recognition and translation for iPhone Safari.
+Real‑time speech recognition, translation, and TTS for iPhone Safari.
 
 ## Quick start
 
@@ -65,6 +65,22 @@ DASHSCOPE_VAD_THRESHOLD=0.0
 DASHSCOPE_FUN_ASR_SEMANTIC_PUNCTUATION_ENABLED=false
 DASHSCOPE_FUN_ASR_MAX_SENTENCE_SILENCE_MS=600
 DASHSCOPE_FUN_ASR_MULTI_THRESHOLD_MODE_ENABLED=true
+DASHSCOPE_TTS_MODEL=qwen3-tts-flash-realtime
+DASHSCOPE_TTS_URL_REALTIME=wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+DASHSCOPE_TTS_VOICE=Cherry
+DASHSCOPE_TTS_SAMPLE_RATE=24000
+
+## Defaults (UI)
+
+- Model defaults to **gummy-realtime-v1**.
+- Translation is enabled by default with target **zh**.
+- TTS is enabled by default; select voice from the TTS dropdown.
+
+## TTS notes
+
+- TTS is server‑side and streams PCM audio back to the browser.
+- TTS only runs on **final** recognition results (no partial).
+- Voice selection maps to DashScope TTS voices (e.g., Cherry, Serena, Ethan).
 ```
 
 ## Supported translation targets

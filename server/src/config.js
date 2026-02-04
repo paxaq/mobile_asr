@@ -54,6 +54,12 @@ export const config = {
       "fun-asr-realtime",
       "gummy-realtime-v1"
     ]),
-    sessionUpdateTemplate: parseJson(process.env.DASHSCOPE_SESSION_UPDATE)
+    sessionUpdateTemplate: parseJson(process.env.DASHSCOPE_SESSION_UPDATE),
+    tts: {
+      model: process.env.DASHSCOPE_TTS_MODEL || "qwen3-tts-flash-realtime",
+      urlRealtime: process.env.DASHSCOPE_TTS_URL_REALTIME || "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+      voice: process.env.DASHSCOPE_TTS_VOICE || "Cherry",
+      sampleRate: parseNumber(process.env.DASHSCOPE_TTS_SAMPLE_RATE, 24000)
+    }
   }
 };

@@ -7,6 +7,7 @@ import { WebSocketServer } from "ws";
 import { verifyToken } from "./auth.js";
 import { SessionManager } from "./sessions.js";
 import { DashScopeASR } from "./asrDashscope.js";
+import { QwenTTSRealtime } from "./ttsQwen.js";
 import { config } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -48,6 +49,9 @@ const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
 const sessions = new SessionManager({ recordingsDir });
 const asrSessions = new Map(); // sessionId -> DashScopeASR
+const ttsSessions = new Map(); // sessionId -> QwenTTSRealtime
+const idleTimers = new Map(); // sessionId -> timeout handle
+const idleTimeouts = new Map(); // sessionId -> timeout ms
 
 const DEBUG = config.debug.asr;
 function debugLog(...args) {
@@ -58,7 +62,88 @@ function send(ws, obj) {
   ws.send(JSON.stringify(obj));
 }
 
+function clearIdle(sessionId) {
+  const timer = idleTimers.get(sessionId);
+  if (timer) clearTimeout(timer);
+  idleTimers.delete(sessionId);
+}
+
+function scheduleIdle(sessionId, timeoutMs, ws) {
+  clearIdle(sessionId);
+  if (!timeoutMs || timeoutMs <= 0) return;
+  const handle = setTimeout(() => {
+    const asr = asrSessions.get(sessionId);
+    asr?.finish();
+    setTimeout(() => asr?.stop(), 500);
+    asrSessions.delete(sessionId);
+
+    const tts = ttsSessions.get(sessionId);
+    tts?.finish();
+    setTimeout(() => tts?.close(), 500);
+    ttsSessions.delete(sessionId);
+
+    sessions.stop(sessionId);
+    clearIdle(sessionId);
+    idleTimeouts.delete(sessionId);
+    send(ws, {
+      type: "server.error",
+      code: "IDLE_TIMEOUT",
+      session_id: sessionId,
+      message: `Session idle for ${Math.round(timeoutMs / 1000)}s; stopped.`
+    });
+  }, timeoutMs);
+  idleTimers.set(sessionId, handle);
+}
+
+function updateIdle(sessionId, ws) {
+  if (!sessionId) return;
+  const ms = idleTimeouts.get(sessionId) ?? 600000;
+  scheduleIdle(sessionId, ms, ws);
+}
+
+function ensureTtsSession(sessionId, { model, voice, sampleRate } = {}, ws) {
+  if (ttsSessions.has(sessionId)) return ttsSessions.get(sessionId);
+  const tts = new QwenTTSRealtime({
+    apiKey: config.dashscope.apiKey,
+    url: config.dashscope.tts.urlRealtime,
+    model: model || config.dashscope.tts.model,
+    voice: voice || config.dashscope.tts.voice,
+    sampleRate: sampleRate || config.dashscope.tts.sampleRate,
+    responseFormat: "pcm",
+    mode: "server_commit",
+    onSession: (session) => {
+      send(ws, {
+        type: "tts.session",
+        session_id: sessionId,
+        sample_rate: session?.sample_rate || sampleRate || config.dashscope.tts.sampleRate,
+        voice: session?.voice || voice || config.dashscope.tts.voice,
+        model: session?.model || model || config.dashscope.tts.model
+      });
+    },
+    onAudio: (audioB64, meta) => {
+      send(ws, {
+        type: "tts.audio.delta",
+        session_id: sessionId,
+        audio_b64: audioB64,
+        sample_rate: meta?.sampleRate || sampleRate || config.dashscope.tts.sampleRate,
+        format: meta?.format || "pcm"
+      });
+    },
+    onError: (err) => {
+      send(ws, { type: "tts.error", session_id: sessionId, message: String(err?.message || err) });
+    }
+  });
+
+  tts.connect().catch((err) => {
+    send(ws, { type: "tts.error", session_id: sessionId, message: String(err?.message || err) });
+  });
+
+  ttsSessions.set(sessionId, tts);
+  return tts;
+}
+
 wss.on("connection", (ws, req) => {
+  const connectionSessions = new Set();
   const url = new URL(req.url, `http://${req.headers.host}`);
   const token = url.searchParams.get("token");
 
@@ -96,7 +181,13 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const existed = sessions.has(msg.session_id);
+      connectionSessions.add(msg.session_id);
       sessions.start(msg.session_id, { sampleRate: msg.sample_rate || 16000, frameMs: msg.frame_ms || 20 });
+      const idleTimeoutMs = Number(msg.inactivity_timeout_s) > 0
+        ? Number(msg.inactivity_timeout_s) * 1000
+        : 600000;
+      idleTimeouts.set(msg.session_id, idleTimeoutMs);
+      updateIdle(msg.session_id, ws);
       debugLog("session.start", { session_id: msg.session_id, existed, model: msg.model });
       send(ws, {
         type: "server.info",
@@ -192,6 +283,51 @@ wss.on("connection", (ws, req) => {
       if (seq % 50 === 0) debugLog("audio.frame", { session_id, seq, bytes: pcmBuf.length });
       const asr = asrSessions.get(session_id);
       asr?.sendAudio(pcmBuf);
+      updateIdle(session_id, ws);
+      return;
+    }
+
+    if (msg.type === "tts.start") {
+      const sessionId = msg.session_id;
+      if (!sessionId) return;
+      const idleTimeoutMs = Number(msg.inactivity_timeout_s) > 0
+        ? Number(msg.inactivity_timeout_s) * 1000
+        : 600000;
+      ensureTtsSession(sessionId, {
+        model: msg.model,
+        voice: msg.voice,
+        sampleRate: msg.sample_rate
+      }, ws);
+      idleTimeouts.set(sessionId, idleTimeoutMs);
+      updateIdle(sessionId, ws);
+      return;
+    }
+
+    if (msg.type === "tts.append") {
+      const sessionId = msg.session_id;
+      const text = msg.text || "";
+      if (!sessionId || !text) return;
+      const tts = ensureTtsSession(sessionId, {}, ws);
+      tts.appendText(text);
+      updateIdle(sessionId, ws);
+      return;
+    }
+
+    if (msg.type === "tts.commit") {
+      const sessionId = msg.session_id;
+      if (!sessionId) return;
+      const tts = ensureTtsSession(sessionId, {}, ws);
+      tts.commit();
+      return;
+    }
+
+    if (msg.type === "tts.finish") {
+      const sessionId = msg.session_id;
+      if (!sessionId) return;
+      const tts = ttsSessions.get(sessionId);
+      tts?.finish();
+      setTimeout(() => tts?.close(), 500);
+      ttsSessions.delete(sessionId);
       return;
     }
 
@@ -201,6 +337,13 @@ wss.on("connection", (ws, req) => {
       asr?.finish();
       setTimeout(() => asr?.stop(), 500);
       asrSessions.delete(msg.session_id);
+      const tts = ttsSessions.get(msg.session_id);
+      tts?.finish();
+      setTimeout(() => tts?.close(), 500);
+      ttsSessions.delete(msg.session_id);
+      clearIdle(msg.session_id);
+      idleTimeouts.delete(msg.session_id);
+      connectionSessions.delete(msg.session_id);
       debugLog("session.stop", { session_id: msg.session_id });
       send(ws, { type: "server.info", session_id: msg.session_id, message: "session stopped" });
       return;
@@ -208,6 +351,19 @@ wss.on("connection", (ws, req) => {
   });
 
   ws.on("close", () => {
+    connectionSessions.forEach((sessionId) => {
+      try { sessions.stop(sessionId); } catch {}
+      const asr = asrSessions.get(sessionId);
+      asr?.finish();
+      setTimeout(() => asr?.stop(), 500);
+      asrSessions.delete(sessionId);
+      const tts = ttsSessions.get(sessionId);
+      tts?.finish();
+      setTimeout(() => tts?.close(), 500);
+      ttsSessions.delete(sessionId);
+      clearIdle(sessionId);
+      idleTimeouts.delete(sessionId);
+    });
     clearInterval(pingTimer);
     debugLog("ws closed");
   });
